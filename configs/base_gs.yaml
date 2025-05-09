@@ -66,7 +66,7 @@ model:
 
   background:
     name: background-color # one of [skip-background, background-color]
-    color: black # one of [black, white, random] needs to be defined if name == background-color
+    color: random # one of [black, white, random] needs to be defined if name == background-color
 
   print_stats: true
 
@@ -125,3 +125,11 @@ hydra:
     chdir: false
   run:
     dir: .
+
+# Bilateral grid parameters
+bilateral_grid:
+  enabled: true
+  lr: 0.002
+  grid_X: 16
+  grid_Y: 16
+  grid_W: 8

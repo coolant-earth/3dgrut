@@ -178,6 +178,7 @@ class NeRFDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         output_dict = {
             "data": torch.tensor(img).reshape(out_shape),
             "pose": torch.tensor(self.poses[idx]).unsqueeze(0),
+            "image_id": idx,
         }
 
         if os.path.exists(mask_path := self.mask_paths[idx]):
@@ -202,6 +203,7 @@ class NeRFDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             "rays_dir": self.rays_d_cam,
             "T_to_world": pose,
             "intrinsics": self.intrinsics,
+            "image_id": batch["image_id"].to(self.device, non_blocking=True).long(),
         }
 
         if "mask" in batch:

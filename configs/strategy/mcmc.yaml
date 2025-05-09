@@ -2,7 +2,7 @@ method: MCMCStrategy
 
 print_stats: true
 binom_n_max: 51 # Default value from MCMC paper (no good reason, just a large number https://github.com/ubc-vision/3dgs-mcmc/issues/8)
-opacity_threshold: 0.005 # Minimum opacity -> used to dermine if a Gaussian is alive or dead
+opacity_threshold: 0.05 # Minimum opacity -> used to dermine if a Gaussian is alive or dead
 
 relocate:
   start_iteration: 500 # Start applying the strategy after start_iteration training iterations

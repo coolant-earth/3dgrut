@@ -334,6 +334,30 @@ class Tracer:
             pred_dist = pred_dist.unsqueeze(0).contiguous()
             hits_count = hits_count.unsqueeze(0).contiguous()
 
+            # --------------------------------------------------
+            # Bilateral grid color correction (before background)
+            # --------------------------------------------------
+            if hasattr(gaussians, "bil_grids") and gaussians.bil_grids is not None and hasattr(gpu_batch, "image_id") and gpu_batch.image_id is not None:
+                B, H, W, _ = pred_rgb.shape  # B==1 for our renderer
+                # Normalised pixel positions as in reference implementation
+                grid_y, grid_x = torch.meshgrid(
+                    (torch.arange(H, device=pred_rgb.device, dtype=pred_rgb.dtype) + 0.5) / H,
+                    (torch.arange(W, device=pred_rgb.device, dtype=pred_rgb.dtype) + 0.5) / W,
+                    indexing="ij",
+                )
+                grid_xy = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0)  # [1,H,W,2]
+
+                img_ids = gpu_batch.image_id
+                if img_ids.ndim == 1 or (img_ids.ndim == 2 and img_ids.shape[1] == 1):
+                    img_ids = img_ids.view(1, 1, 1, 1).expand(-1, H, W, 1)
+                else:
+                    img_ids = img_ids.expand(1, H, W, 1)
+
+                from threedgrut.utils.lib_bilagrid import slice as bilagrid_slice
+                guidance_rgb = torch.clamp(pred_rgb, 0.0, 1.0)
+                slice_out = bilagrid_slice(gaussians.bil_grids, grid_xy, guidance_rgb, img_ids)
+                pred_rgb = torch.clamp(slice_out["rgb"], 0.0, 1.0)
+
             pred_rgb, pred_opacity = gaussians.background(
                 gpu_batch.T_to_world.contiguous(), rays_d, pred_rgb, pred_opacity, train
             )

@@ -282,6 +282,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         return self.scene_bbox
 
     def get_scene_extent(self):
+        logger.info(f"ColmapDataset scene extent: {self.cameras_extent}")
         return self.cameras_extent
 
     def get_observer_points(self):
@@ -302,6 +303,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             "data": torch.tensor(image_data).reshape(out_shape),
             "pose": torch.tensor(self.poses[idx]).unsqueeze(0),
             "intr": self.get_intrinsics_idx(idx),
+            "image_id": idx,
         }
 
         # Only add mask to dictionary if it exists
@@ -319,6 +321,8 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
         data = batch["data"][0].to(self.device, non_blocking=True) / 255.0
         pose = batch["pose"][0].to(self.device, non_blocking=True)
         intr = batch["intr"][0].item()
+        # batch["image_id"] is collated as tensor shape (1,), move to device and keep shape [1]
+        image_id = batch["image_id"].to(self.device, non_blocking=True).long()
         assert data.dtype == torch.float32
         assert pose.dtype == torch.float32
 
@@ -330,6 +334,7 @@ class ColmapDataset(Dataset, BoundedMultiViewDataset, DatasetVisualization):
             "rays_dir": rays_dir,
             "T_to_world": pose,
             f"intrinsics_{camera_name}": camera_params_dict,
+            "image_id": image_id,
         }
 
         if "mask" in batch:

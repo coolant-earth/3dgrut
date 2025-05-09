@@ -575,7 +575,12 @@ class MixtureOfGaussians(torch.nn.Module):
         Returns:
             A dictionary containing the output of the model
         """
-        return self.renderer.render(self, batch, train, frame_id)
+        outputs = self.renderer.render(self, batch, train, frame_id)
+
+        # Color correction is now handled inside the renderer (before background) to ensure guidance colors are not
+        # biased by random background. Avoid applying it a second time here.
+
+        return outputs
 
     def trace(self, rays_o, rays_d, T_to_world=None):
         """ Traces the model with the given rays. This method is a convenience method for ray-traced inference mode.

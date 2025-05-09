@@ -43,6 +43,10 @@ from threedgrut.utils.timer import CudaTimer
 from threedgrut.utils.misc import jet_map, create_summary_writer, check_step_condition
 from threedgrut.optimizers import SelectiveAdam
 
+# Bilateral grid utilities
+from threedgrut.utils.lib_bilagrid import BilateralGrid, total_variation_loss, slice as bilagrid_slice
+import math
+
 class Trainer3DGRUT:
     """Trainer for paper: "3D Gaussian Ray Tracing: Fast Tracing of Particle Scenes" """
 
@@ -72,6 +76,11 @@ class Trainer3DGRUT:
 
     tracking: Dict
     """ Contains all components used to report progress of training """
+
+    # --- Bilateral grid related attributes ---
+    bil_grids: Optional[BilateralGrid] = None
+    bil_grid_optimizers: list[torch.optim.Optimizer] = []
+    bil_grid_schedulers: list[torch.optim.lr_scheduler.LRScheduler] = []
 
     @staticmethod
     def create_from_checkpoint(resume: str, conf: DictConfig):
@@ -126,6 +135,12 @@ class Trainer3DGRUT:
         self.init_scene_extents(self.train_dataset)
         logger.log_rule("Initialize Model")
         self.init_model(conf, self.scene_extent)
+
+        # ---------------------------------------------------
+        # Initialize bilateral grids – one grid per training image
+        # ---------------------------------------------------
+        self._init_bilateral_grids()
+
         self.init_densification_and_pruning_strategy(conf)
         logger.log_rule("Setup Model Weights & Training")
         self.init_metrics()
@@ -169,6 +184,7 @@ class Trainer3DGRUT:
     def init_scene_extents(self, train_dataset: BoundedMultiViewDataset) -> None:
         scene_bbox: tuple[torch.Tensor, torch.Tensor]  # Tuple of vec3 (min,max)
         scene_extent = train_dataset.get_scene_extent()
+        logger.info(f"Trainer: scene_extent={scene_extent}")
         scene_bbox = train_dataset.get_scene_bbox()
         self.scene_extent = scene_extent
         self.scene_bbox = scene_bbox
@@ -395,6 +411,9 @@ class Trainer3DGRUT:
             rgb_gt = rgb_gt * mask
             rgb_pred = rgb_pred * mask
 
+        # Bilateral grid correction is applied inside model.forward so that `outputs['pred_rgb']`
+        # already contains corrected colors. No need to re‑apply it here.
+
         # L1 loss
         loss_l1 = torch.zeros(1, device=self.device)
         lambda_l1 = 0.0
@@ -437,9 +456,28 @@ class Trainer3DGRUT:
                 loss_scale = torch.abs(self.model.get_scale()).mean()
                 lambda_scale = self.conf.loss.lambda_scale
 
+        # Add bilateral grid total variation loss if enabled
+        tv_loss = torch.zeros(1, device=self.device)
+        if self.bil_grids is not None:
+            tv_loss = 10.0 * total_variation_loss(self.bil_grids.grids)
+
         # Total loss
-        loss = lambda_l1 * loss_l1 + lambda_ssim * loss_ssim + lambda_opacity * loss_opacity + lambda_scale * loss_scale
-        return dict(total_loss=loss, l1_loss=lambda_l1 * loss_l1, l2_loss=lambda_l2 * loss_l2, ssim_loss=lambda_ssim * loss_ssim, opacity_loss=lambda_opacity * loss_opacity, scale_loss=lambda_scale * loss_scale)
+        loss = (
+            lambda_l1 * loss_l1
+            + lambda_ssim * loss_ssim
+            + lambda_opacity * loss_opacity
+            + lambda_scale * loss_scale
+            + tv_loss
+        )
+        return dict(
+            total_loss=loss,
+            l1_loss=lambda_l1 * loss_l1,
+            l2_loss=lambda_l2 * loss_l2,
+            ssim_loss=lambda_ssim * loss_ssim,
+            opacity_loss=lambda_opacity * loss_opacity,
+            scale_loss=lambda_scale * loss_scale,
+            tv_loss=tv_loss,
+        )
 
     @torch.cuda.nvtx.range("log_validation_iter")
     def log_validation_iter(
@@ -728,18 +766,25 @@ class Trainer3DGRUT:
                     step=global_step, scene_extent=self.scene_extent, train_dataset=self.train_dataset, batch=gpu_batch, writer=self.tracking.writer
                 )
 
-            # Optimizer step
-            with torch.cuda.nvtx.range(f"train_{global_step}_backprop"):
-                if isinstance(model.optimizer, SelectiveAdam):
-                    assert outputs['mog_visibility'].shape == model.density.shape, f"Visibility shape {outputs['mog_visibility'].shape} does not match density shape {model.density.shape}"
-                    model.optimizer.step(outputs['mog_visibility'])
-                else:
-                    model.optimizer.step()
-                model.optimizer.zero_grad()
+            # First, update bilateral grid parameters if they exist
+            if self.bil_grids is not None:
+                for opt in self.bil_grid_optimizers:
+                    opt.step()
+                    opt.zero_grad(set_to_none=True)
+
+            if isinstance(model.optimizer, SelectiveAdam):
+                assert outputs['mog_visibility'].shape == model.density.shape, f"Visibility shape {outputs['mog_visibility'].shape} does not match density shape {model.density.shape}"
+                model.optimizer.step(outputs['mog_visibility'])
+            else:
+                model.optimizer.step()
+            model.optimizer.zero_grad()
 
             # Scheduler step
             with torch.cuda.nvtx.range(f"train_{global_step}_scheduler"):
                 model.scheduler_step(global_step)
+                if self.bil_grids is not None:
+                    for sch in self.bil_grid_schedulers:
+                        sch.step()
 
             # Post backward strategy step
             with torch.cuda.nvtx.range(f"train_{global_step}_post_opt_step"):
@@ -880,3 +925,35 @@ class Trainer3DGRUT:
             self.gui.training_done = True
             logger.info(f"🎨 GUI Blocking... Terminate GUI to Stop.")
             self.gui.block_in_rendering_loop(fps=60)
+
+    def _init_bilateral_grids(self):
+        """Create bilateral grids and associated optimizers & schedulers."""
+        # If config does not enable bilagrid training skip
+        if not (hasattr(self.conf, "bilateral_grid") and getattr(self.conf.bilateral_grid, "enabled", False)):
+            return
+
+        n_views = len(self.train_dataset)
+        # Grid resolution parameters – allow override via config
+        grid_X = getattr(self.conf.bilateral_grid, "grid_X", 16)
+        grid_Y = getattr(self.conf.bilateral_grid, "grid_Y", 16)
+        grid_W = getattr(self.conf.bilateral_grid, "grid_W", 8)
+
+        logger.info(f"Initializing bilateral grids: {n_views} views, res=({grid_X},{grid_Y},{grid_W})")
+        self.bil_grids = BilateralGrid(num=n_views, grid_X=grid_X, grid_Y=grid_Y, grid_W=grid_W).to(self.device)
+
+        # Reference implementation uses 2e‑3 * sqrt(batch_size) as base LR
+        bsz = 1  # Current pipeline uses batch_size=1
+        base_lr = self.conf.bilateral_grid.lr * math.sqrt(bsz)
+        optimizer = torch.optim.Adam(self.bil_grids.parameters(), lr=base_lr, eps=1e-15)
+        self.bil_grid_optimizers.append(optimizer)
+
+        # Expose the bilateral grids to the gaussian model so that the renderer can access it.
+        # This allows color‑correction to be applied during any forward rendering pass (e.g. GUI, inference).
+        setattr(self.model, "bil_grids", self.bil_grids)
+
+        from torch.optim.lr_scheduler import ChainedScheduler, LinearLR, ExponentialLR
+
+        warmup = LinearLR(optimizer, start_factor=0.01, total_iters=1000)
+        decay = ExponentialLR(optimizer, gamma=(0.01) ** (1.0 / self.conf.n_iterations))
+        scheduler = ChainedScheduler([warmup, decay])
+        self.bil_grid_schedulers.append(scheduler)

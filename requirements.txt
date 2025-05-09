@@ -20,10 +20,11 @@ dataclasses_json
 # JIT compilation
 setuptools <72.1.0
 # Fused-ssim
-git+https://github.com/rahul-goel/fused-ssim@1272e21a282342e89537159e4bad508b19b34157
+git+https://github.com/rahul-goel/fused-ssim@8bdb59feb7b9a41b1fab625907cb21f5417deaac
 # Playground
 tqdm
 libigl
 pygltflib
 # --find-links https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.1.2_cu118.html
 # kaolin==0.17.0
+tensorly
