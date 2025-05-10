@@ -22,7 +22,7 @@ checkpoint:
 
 # Bilateral grid parameters
 bilateral_grid:
-  enabled: true
+  enabled: false
   lr: 0.002
   grid_X: 16
   grid_Y: 16
